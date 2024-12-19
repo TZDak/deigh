@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      font-family: sans-serif;
+      background: #f0f0f0;
+      padding: 20px;
+    }
+    #board {
+      background: white;
+      border: 2px solid #333;
+      display: grid;
+      grid-template-columns: repeat(8, 50px);
+      grid-template-rows: repeat(8, 50px);
+      margin-bottom: 10px;
+    }
+    .square {
+      width: 50px;
+      height: 50px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      font-size: 30px;
+      cursor: pointer;
+    }
+    .white { background: #fff; }
+    .black { background: #ccc; }
+    .selected { background: #ffeb3b !important; }
+    .valid-move { background: #81c784 !important; }
+    .valid-capture { background: #ef5350 !important; }
+    .valid-enpassant { background-color: #c781c4 !important; }
+    .valid-castle { background-color: #54b4f7 !important; }
+    #turn-display {
+      font-size: 1.2em;
+      margin: 10px 0;
+      font-weight: bold;
+    }
+    #controls {
+      margin: 10px 0;
+    }
+    button {
+      padding: 8px 16px;
+      margin: 0 4px;
+      cursor: pointer;
+    }
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.5;
+    }
+  </style>
+</head>
+<body>
+  <div id="turn-display">White to Move</div>
+  <div id="board"></div>
+  <div id="controls">
+    <button id="reset">Reset Game</button>
+    <button id="undo" disabled>Undo Move</button>
+  </div>
+
+  <script>
+    class ChessGame {
+      constructor() {
+        this.WHITE_PIECES = ['♔', '♕', '♖', '♗', '♘', '♙', '♤'];
+        this.BLACK_PIECES = ['♚', '♛', '♜', '♝', '♞', '♟', '♠'];
+        this.initialBoard = [
+          ['♜', '♞', '♝', '♛', '♚', '♝', '♞', '♜'],
+          ['♟', '♠', '♟', '♟', '♟', '♟', '♠', '♟'],
+          ['', '', '', '', '', '', '', ''],
+          ['', '', '', '', '', '', '', ''],
+          ['', '', '', '', '', '', '', ''],
+          ['', '', '', '', '', '', '', ''],
+          ['♙', '♤', '♙', '♙', '♙', '♙', '♤', '♙'],
+          ['♖', '♘', '♗', '♕', '♔', '♗', '♘', '♖']
+        ];
+        
+        this.board = this.deepCopy(this.initialBoard);
+        this.selectedSquare = null;
+        this.currentPlayer = 'white';
+        this.moveHistory = [];
+        this.lastMove = null;  // Will track {piece, from, to} for en passant
+
+        this.movedPieces = {
+          whiteKing: false,
+          blackKing: false,
+          whiteRookA: false,
+          whiteRookH: false,
+          blackRookA: false,
+          blackRookH: false
+        };
+      
+        // Define deigh move paths (each array represents a possible path direction)
+        this.deighPaths = [
+          // Up paths
+          [[0, -1], [0, -2], [1, -2]],
+          [[0, -1], [0, -2], [-1, -2]],
+          [[0, -1], [-1, -1], [-2, -1]],
+          [[0, -1], [1, -1], [2, -1]],
+          // Right paths
+          [[1, 0], [2, 0], [2, 1]],
+          [[1, 0], [2, 0], [2, -1]],
+          [[1, 0], [1, 1], [1, 2]],
+          [[1, 0], [1, -1], [1, -2]],
+          // Down paths
+          [[0, 1], [0, 2], [1, 2]],
+          [[0, 1], [0, 2], [-1, 2]],
+          [[0, 1], [-1, 1], [-2, 1]],
+          [[0, 1], [1, 1], [2, 1]],
+          // Left paths
+          [[-1, 0], [-2, 0], [-2, 1]],
+          [[-1, 0], [-2, 0], [-2, -1]],
+          [[-1, 0], [-1, 1], [-1, 2]],
+          [[-1, 0], [-1, -1], [-1, -2]]
+        ];
+        
+        this.initializeBoard();
+        this.addEventListeners();
+        this.updateTurnDisplay();
+      }
+
+      initializeBoard() {
+        const boardElement = document.getElementById('board');
+        boardElement.innerHTML = '';
+        
+        for (let row = 0; row < 8; row++) {
+          for (let col = 0; col < 8; col++) {
+            const square = document.createElement('div');
+            square.className = `square ${(row + col) % 2 ? 'black' : 'white'}`;
+            square.dataset.row = row;
+            square.dataset.col = col;
+            square.textContent = this.board[row][col];
+            boardElement.appendChild(square);
+          }
+        }
+      }
+
+      addEventListeners() {
+        const boardElement = document.getElementById('board');
+        boardElement.addEventListener('click', (e) => {
+          if (e.target.classList.contains('square')) {
+            this.handleSquareClick(e.target);
+          }
+        });
+
+        document.getElementById('reset').addEventListener('click', () => this.resetGame());
+        document.getElementById('undo').addEventListener('click', () => this.undoMove());
+      }
+
+      isDeigh(piece) {
+        return piece === '♤' || piece === '♠';
+      }
+
+      isValidDeighMove(fromRow, fromCol, toRow, toCol) {
+        // Check each possible path the deigh can take
+        return this.deighPaths.some(path => {
+          let currentRow = fromRow;
+          let currentCol = fromCol;
+          
+          // Check each step in the path
+          for (let i = 0; i < path.length; i++) {
+            const nextRow = fromRow + path[i][0];
+            const nextCol = fromCol + path[i][1];
+            
+            // If we've reached our target square at any point in the path
+            if (nextRow === toRow && nextCol === toCol) {
+              // Validate all squares up to this point are empty and in bounds
+              for (let j = 0; j < i; j++) {
+                const checkRow = fromRow + path[j][0];
+                const checkCol = fromCol + path[j][1];
+                if (checkRow < 0 || checkRow >= 8 || checkCol < 0 || checkCol >= 8 || 
+                    this.board[checkRow][checkCol] !== '') {
+                  return false;
+                }
+              }
+              return true;
+            }
+          }
+          return false;
+        });
+      }
+
+      getValidDeighMoves(fromRow, fromCol) {
+        const validMoves = [];
+        
+        this.deighPaths.forEach(path => {
+          // Check each position along the path
+          for (let i = 0; i < path.length; i++) {
+            const toRow = fromRow + path[i][0];
+            const toCol = fromCol + path[i][1];
+            
+            // Check if position is in bounds
+            if (toRow < 0 || toRow >= 8 || toCol < 0 || toCol >= 8) continue;
+            
+            // Check if path to this position is clear
+            let pathClear = true;
+            for (let j = 0; j < i; j++) {
+              const checkRow = fromRow + path[j][0];
+              const checkCol = fromCol + path[j][1];
+              if (this.board[checkRow][checkCol] !== '') {
+                pathClear = false;
+                break;
+              }
+            }
+            
+            if (pathClear) {
+              // Square is either empty or contains enemy piece
+              if (this.board[toRow][toCol] === '' || 
+                  this.isPieceOwnedByCurrentPlayer(this.board[toRow][toCol]) === false) {
+                validMoves.push([toRow, toCol]);
+              }
+            }
+          }
+        });
+        
+        return validMoves;
+      }
+
+      isValidMove(fromRow, fromCol, toRow, toCol) {
+        const piece = this.board[fromRow][fromCol];
+        const targetPiece = this.board[toRow][toCol];
+
+        // Basic validation
+        if (toRow < 0 || toRow >= 8 || toCol < 0 || toCol >= 8) return false;
+        if (targetPiece && this.isPieceOwnedByCurrentPlayer(targetPiece)) return false;
+
+        // Deigh movement
+        if (this.isDeigh(piece)) {
+          return this.isValidDeighMove(fromRow, fromCol, toRow, toCol);
+        }
+
+        // All other pieces' movement validation
+        switch (piece) {
+          case '♙': // White pawn
+            if (fromRow === 6) { // Starting position
+              if ((toCol === fromCol && toRow === fromRow - 1 && !targetPiece) || 
+                  (toCol === fromCol && toRow === fromRow - 2 && !targetPiece && !this.board[fromRow - 1][fromCol])) {
+                return true;
+              }
+            }
+            if (toCol === fromCol && toRow === fromRow - 1 && !targetPiece) {
+              return true;
+            }
+            if (Math.abs(toCol - fromCol) === 1 && toRow === fromRow - 1) {
+              // Regular capture
+              if (targetPiece && this.BLACK_PIECES.includes(targetPiece)) {
+                return true;
+              }
+              // En passant
+              if (!targetPiece && this.lastMove && 
+                  this.lastMove.piece === '♟' && 
+                  this.lastMove.from.row === 1 && 
+                  this.lastMove.to.row === 3 && 
+                  this.lastMove.to.col === toCol && 
+                  fromRow === 3) {
+                return true;
+              }
+            }
+            return false;
+
+          case '♟': // Black pawn
+            if (fromRow === 1) { // Starting position
+              if ((toCol === fromCol && toRow === fromRow + 1 && !targetPiece) || 
+                  (toCol === fromCol && toRow === fromRow + 2 && !targetPiece && !this.board[fromRow + 1][fromCol])) {
+                return true;
+              }
+            }
+            if (toCol === fromCol && toRow === fromRow + 1 && !targetPiece) {
+              return true;
+            }
+            if (Math.abs(toCol - fromCol) === 1 && toRow === fromRow + 1) {
+              // Regular capture
+              if (targetPiece && this.WHITE_PIECES.includes(targetPiece)) {
+                return true;
+              }
+              // En passant
+              if (!targetPiece && this.lastMove && 
+                  this.lastMove.piece === '♙' && 
+                  this.lastMove.from.row === 6 && 
+                  this.lastMove.to.row === 4 && 
+                  this.lastMove.to.col === toCol && 
+                  fromRow === 4) {
+                return true;
+              }
+            }
+            return false;
+
+          case '♘': case '♞': // Knights
+            return (Math.abs(toRow - fromRow) === 2 && Math.abs(toCol - fromCol) === 1) ||
+                  (Math.abs(toRow - fromRow) === 1 && Math.abs(toCol - fromCol) === 2);
+
+          case '♗': case '♝': // Bishops
+            if (Math.abs(toRow - fromRow) !== Math.abs(toCol - fromCol)) return false;
+            return this.isDiagonalPathClear(fromRow, fromCol, toRow, toCol);
+
+          case '♖': case '♜': // Rooks
+            if (toRow !== fromRow && toCol !== fromCol) return false;
+            return this.isStraightPathClear(fromRow, fromCol, toRow, toCol);
+
+          case '♕': case '♛': // Queens
+            if (toRow === fromRow || toCol === fromCol) {
+              return this.isStraightPathClear(fromRow, fromCol, toRow, toCol);
+            }
+            if (Math.abs(toRow - fromRow) === Math.abs(toCol - fromCol)) {
+              return this.isDiagonalPathClear(fromRow, fromCol, toRow, toCol);
+            }
+            return false;
+
+          case '♔': case '♚': // Kings
+            // Normal king movement
+            if (Math.abs(toRow - fromRow) <= 1 && Math.abs(toCol - fromCol) <= 1) {
+              return true;
+            }
+            
+            // Castling
+            const isWhiteKing = piece === '♔';
+            const baseRow = isWhiteKing ? 7 : 0;
+            
+            if (fromRow === baseRow && fromCol === 4 && toRow === baseRow) {
+              // Check if king hasn't moved
+              if (isWhiteKing && this.movedPieces.whiteKing) return false;
+              if (!isWhiteKing && this.movedPieces.blackKing) return false;
+
+              // Kingside castling
+              if (toCol === 6) {
+                const rookMoved = isWhiteKing ? this.movedPieces.whiteRookH : this.movedPieces.blackRookH;
+                if (!rookMoved && 
+                    !this.board[baseRow][5] && 
+                    !this.board[baseRow][6] && 
+                    this.board[baseRow][7] === (isWhiteKing ? '♖' : '♜')) {
+                  return true;
+                }
+              }
+              
+              // Queenside castling
+              if (toCol === 2) {
+                const rookMoved = isWhiteKing ? this.movedPieces.whiteRookA : this.movedPieces.blackRookA;
+                if (!rookMoved && 
+                    !this.board[baseRow][1] && 
+                    !this.board[baseRow][2] && 
+                    !this.board[baseRow][3] && 
+                    this.board[baseRow][0] === (isWhiteKing ? '♖' : '♜')) {
+                  return true;
+                }
+              }
+            }
+            return false;
+
+        }
+        return false;
+      }
+
+      showValidMoves(row, col) {
+        const piece = this.board[row][col];
+        
+        if (this.isDeigh(piece)) {
+          const validMoves = this.getValidDeighMoves(row, col);
+          validMoves.forEach(([toRow, toCol]) => {
+            const square = document.querySelector(`[data-row="${toRow}"][data-col="${toCol}"]`);
+            if (this.board[toRow][toCol]) {
+              square.classList.add('valid-capture');
+            } else {
+              square.classList.add('valid-move');
+            }
+          });
+        } else {
+          for (let toRow = 0; toRow < 8; toRow++) {
+            for (let toCol = 0; toCol < 8; toCol++) {
+              if (this.isValidMove(row, col, toRow, toCol)) {
+                const square = document.querySelector(`[data-row="${toRow}"][data-col="${toCol}"]`);
+                
+                const piece = this.board[row][col];
+                // Check for castling
+                if ((piece === '♔' || piece === '♚') && 
+                    Math.abs(toCol - col) === 2) {
+                  square.classList.add('valid-castle');
+                }
+                // Check for en passant
+                else if ((piece === '♙' || piece === '♟') && 
+                    Math.abs(col - toCol) === 1 && 
+                    !this.board[toRow][toCol] &&
+                    ((piece === '♙' && row === 3 && this.lastMove?.piece === '♟' && this.lastMove.from.row === 1 && this.lastMove.to.row === 3 && this.lastMove.to.col === toCol) ||
+                    (piece === '♟' && row === 4 && this.lastMove?.piece === '♙' && this.lastMove.from.row === 6 && this.lastMove.to.row === 4 && this.lastMove.to.col === toCol))) {
+                  square.classList.add('valid-enpassant');
+                }
+                else if (this.board[toRow][toCol]) {
+                  square.classList.add('valid-capture');
+                } else {
+                  square.classList.add('valid-move');
+                }
+              }
+            }
+          }
+        }
+      }
+
+      isStraightPathClear(fromRow, fromCol, toRow, toCol) {
+        const rowDir = fromRow === toRow ? 0 : (toRow - fromRow) / Math.abs(toRow - fromRow);
+        const colDir = fromCol === toCol ? 0 : (toCol - fromCol) / Math.abs(toCol - fromCol);
+        let row = fromRow + rowDir;
+        let col = fromCol + colDir;
+
+        while (row !== toRow || col !== toCol) {
+          if (this.board[row][col]) return false;
+          row += rowDir;
+          col += colDir;
+        }
+        return true;
+      }
+
+      isDiagonalPathClear(fromRow, fromCol, toRow, toCol) {
+        const rowDir = (toRow - fromRow) / Math.abs(toRow - fromRow);
+        const colDir = (toCol - fromCol) / Math.abs(toCol - fromCol);
+        let row = fromRow + rowDir;
+        let col = fromCol + colDir;
+
+        while (row !== toRow && col !== toCol) {
+          if (this.board[row][col]) return false;
+          row += rowDir;
+          col += colDir;
+        }
+        return true;
+      }
+
+      handleSquareClick(square) {
+        const row = parseInt(square.dataset.row);
+        const col = parseInt(square.dataset.col);
+        const piece = this.board[row][col];
+
+        // Clear previous highlights
+        this.clearHighlights();
+
+        // If no square is selected
+        if (!this.selectedSquare) {
+          if (piece && this.isPieceOwnedByCurrentPlayer(piece)) {
+            this.selectedSquare = { row, col };
+            square.classList.add('selected');
+            this.showValidMoves(row, col);
+          }
+          return;
+        }
+
+        // If a square is already selected
+        const { row: fromRow, col: fromCol } = this.selectedSquare;
+        
+        // Clicking the same square deselects it
+        if (fromRow === row && fromCol === col) {
+          this.selectedSquare = null;
+          return;
+        }
+
+        // Attempt to make a move
+        if (this.isValidMove(fromRow, fromCol, row, col)) {
+          this.makeMove(fromRow, fromCol, row, col);
+          this.selectedSquare = null;
+          document.getElementById('undo').disabled = false;
+        } else if (piece && this.isPieceOwnedByCurrentPlayer(piece)) {
+          // Select new piece
+          this.selectedSquare = { row, col };
+          square.classList.add('selected');
+          this.showValidMoves(row, col);
+        }
+      }
+
+      makeMove(fromRow, fromCol, toRow, toCol) {
+        const piece = this.board[fromRow][fromCol];
+        const move = {
+          from: { row: fromRow, col: fromCol },
+          to: { row: toRow, col: toCol },
+          piece: piece,
+          captured: this.board[toRow][toCol],
+          isCastle: false,
+          previousMovedPieces: { ...this.movedPieces }  // Save previous state
+        };
+
+        // Track piece movements for castling
+        if (piece === '♔') this.movedPieces.whiteKing = true;
+        if (piece === '♚') this.movedPieces.blackKing = true;
+        if (piece === '♖') {
+          if (fromRow === 7 && fromCol === 0) this.movedPieces.whiteRookA = true;
+          if (fromRow === 7 && fromCol === 7) this.movedPieces.whiteRookH = true;
+        }
+        if (piece === '♜') {
+          if (fromRow === 0 && fromCol === 0) this.movedPieces.blackRookA = true;
+          if (fromRow === 0 && fromCol === 7) this.movedPieces.blackRookH = true;
+        }
+
+        // Handle castling moves
+        if ((piece === '♔' || piece === '♚') && Math.abs(toCol - fromCol) === 2) {
+          move.isCastle = true;
+          const isKingside = toCol === 6;
+          const baseRow = fromRow;
+          const rookFromCol = isKingside ? 7 : 0;
+          const rookToCol = isKingside ? 5 : 3;
+          
+          // Move the rook
+          this.board[baseRow][rookToCol] = this.board[baseRow][rookFromCol];
+          this.board[baseRow][rookFromCol] = '';
+        }
+
+        // Handle en passant capture
+        if ((piece === '♙' || piece === '♟') && 
+            fromCol !== toCol && 
+            !this.board[toRow][toCol]) {
+          const capturedPawnRow = fromRow;
+          const capturedPawnCol = toCol;
+          move.captured = this.board[capturedPawnRow][capturedPawnCol];
+          this.board[capturedPawnRow][capturedPawnCol] = '';
+        }
+
+        this.moveHistory.push(move);
+        this.lastMove = {
+          piece: piece,
+          from: { row: fromRow, col: fromCol },
+          to: { row: toRow, col: toCol }
+        };
+        this.board[toRow][toCol] = piece;
+        this.board[fromRow][fromCol] = '';
+        this.currentPlayer = this.currentPlayer === 'white' ? 'black' : 'white';
+        this.initializeBoard();
+        this.updateTurnDisplay();
+      }
+
+      undoMove() {
+        if (this.moveHistory.length === 0) return;
+
+        const move = this.moveHistory.pop();
+        
+        // Restore the previous moved pieces state
+        this.movedPieces = { ...move.previousMovedPieces };
+        
+        this.board[move.from.row][move.from.col] = move.piece;
+        
+        if (move.isCastle) {
+          const isKingside = move.to.col === 6;
+          const baseRow = move.from.row;
+          const rookFromCol = isKingside ? 5 : 3;
+          const rookToCol = isKingside ? 7 : 0;
+          this.board[baseRow][rookToCol] = this.board[baseRow][rookFromCol];
+          this.board[baseRow][rookFromCol] = '';
+          this.board[move.to.row][move.to.col] = '';
+        }
+        else if ((move.piece === '♙' || move.piece === '♟') && 
+            move.from.col !== move.to.col && 
+            !move.captured) {
+          // En passant
+          this.board[move.from.row][move.to.col] = move.captured;
+          this.board[move.to.row][move.to.col] = '';
+        } else {
+          this.board[move.to.row][move.to.col] = move.captured;
+        }
+
+        // Update lastMove to previous move in history
+        this.lastMove = this.moveHistory.length > 0 ? 
+          this.moveHistory[this.moveHistory.length - 1] : null;
+
+        this.currentPlayer = this.currentPlayer === 'white' ? 'black' : 'white';
+        this.initializeBoard();
+        this.updateTurnDisplay();
+
+        if (this.moveHistory.length === 0) {
+          document.getElementById('undo').disabled = true;
+        }
+      }
+
+      resetGame() {
+        this.board = this.deepCopy(this.initialBoard);
+        this.selectedSquare = null;
+        this.currentPlayer = 'white';
+        this.moveHistory = [];
+        this.initializeBoard();
+        this.updateTurnDisplay();
+        document.getElementById('undo').disabled = true;
+      }
+
+      clearHighlights() {
+        document.querySelectorAll('.square').forEach(square => {
+          square.classList.remove('selected', 'valid-move', 'valid-capture', 'valid-enpassant', 'valid-castle');
+        });
+      }
+
+      updateTurnDisplay() {
+        document.getElementById('turn-display').textContent = 
+          `${this.currentPlayer.charAt(0).toUpperCase() + this.currentPlayer.slice(1)} to Move`;
+      }
+
+      isPieceOwnedByCurrentPlayer(piece) {
+        return this.currentPlayer === 'white' ? 
+          this.WHITE_PIECES.includes(piece) : 
+          this.BLACK_PIECES.includes(piece);
+      }
+
+      deepCopy(arr) {
+        return JSON.parse(JSON.stringify(arr));
+      }
+    }
+
+    // Initialize the game
+    const game = new ChessGame();
+  </script>
+</body>
+</html>
